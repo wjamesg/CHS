@@ -18,66 +18,75 @@ from captum.attr import IntegratedGradients
 import shap
 
 # Some basic input parameters
-#this is a test
+
+# Data-related input and preparation
+datadir         = "C:/jim/Sab/CHS/"
+trainTestData   = True # input separate train/test data
+trainData       = 'CHSTrain.csv' # train and test data if trainTestData=True
+testData        = 'CHSTest.csv'
+allData         = 'CHS.csv' # all data if trainTestData=False
+testSize        = 0.1  # if trainTestData=False, what fraction of allData allocated to testing?
+valSize         = 0.1  # what fraction of training data allocated to validation
 binary_outcome  = False  # True or False (capitalized)
+outFileBase     = "CHS1"
+codeCodom       = False  # additively coded g in input data will be recoded into two codom indicators in split_columns
 use_study       = False # Include study indicators?  If so, 2-component network will be used (simpleNN_2)
 PATHWAY_AS_INTERMEDIATE = False
-datadir         = "C:/jim/Sab/Sab1/NNPlusXAI/"
-filename        = "simulationChallenge2.csv"  # CRC_deltad includes both original D and study adjusted deltad
-outFileBase     = "simChallenge2"
-codeCodom       = False  # additively coded g in filename will be recoded into two codom indicators in split_columns
-Path2Pathway_File = "pathways2.csv"
-testSize        = 0.1  # what fraction of full dataset allocated to testing?
-valSize         = 0.1  # what fraction of full dataset to allocate to validation
-n_epochs_trial  = 50  # how many epochs during optuna trial phase?
-n_epochs_test   = 200  # how many epochs during final training/testing phase?
-batchsize_test  = 512   # how many per batch for test evaluation (ignored for all training)
-ranNum          = 123  # Initial seed value for random number generator
+Path2Pathway_File       = "pathways2.csv"
+PATHWAY_ARRAY_LENGTH    = 1  # The length of the subarray which represent one pathway node
+NUMBER_OF_COVARIATES    = 16 # The number of covariates for pathway as intermediate model and they are the columns at the left side of the input file
+
+# NN architecture
 tune            = False # True: use optuna to train;  False: train using fixed set of hyperparms
 prune           = False # if tuning, do you want to prune epochs that do not appear to be improvements?
-# t_: Tuning set of hyperparameters to be considered by Optuna, if tune=True
-t_n_trials          = 100 # how many trials to run
-tLR_lo              = 0.001  # learning rate  values will be log sampled on this range
-tLR_hi              = 0.1
-tDrop_lo            = 0.05   # dropout  values sampled on this range
-tDrop_hi            = 0.4
-t_activation_name   = ['relu', 'leaky_relu', 'elu']
-t_weight_init       = ['None']  # 'kaiming_uniform'
-tBatch_lo           = 16      # sampled on this range
-tBatch_hi           = 64
-t_weight_decay      = [0, 1e-4, 1e-3]     # this should be numbers representing categories to try
-# structure of the main network and if use_study, the second network
-t_nHidden_lo        = 1       # sampled
-t_nHidden_hi        = 3
-t_nNeurons_lo       = 8       # sampled
-t_nNeurons_hi       = 512
-t_n_hidden2         = 0   # how many hidden layers in second (study+) network (zero will use study as bias parms)
-t_n_neurons2        = 8   # how many neurons per hidden layer in first network (irrelevant if hidden2=0)
-# Note: the n_out_neurons1 value is set below and is not currently tunable
-
-# weight decay is penalty on # parms of form weight_decay*sum(weights^2) so model does not get too complex
-
-# f_: Fixed values for running training/val only once, if tune=False (ignored if doing optuna)
+# f_: if tune=False:  Fixed values for running training/val only once
+# (ignored if doing optuna)
 # first set up the two parts of the network
-f_dropout_rate        = 0.25
+f_n_hidden            = 2     # how many hidden layers in first network
+f_n_neurons           = 16    # how many neurons per hidden layer in first network
 f_activation_name     = "Linear" # no activation...should approximate logistic or linear regression
 f_activation_name     = "Softplus" # activation fct for hidden layers in first network
+n_epochs_test         = 200  # how many epochs during final training/testing phase?
+batchsize_test        = 512   # how many per batch for test evaluation (ignored for all training)
+ranNum                = 123  # Initial seed value for random number generator
+f_dropout_rate        = 0.25
 f_batch_size          = 512
 f_weight_decay        = 0.0  # >0 does regularization...default to zero
+# weight decay is L2 penalty on # parms of form weight_decay*sum(weights^2) so model does not get too complex
 f_lr_init             = 0.001 # initial lr used by scheduler
 f_lr_step_size        = 20    # lr stepsize used by scheduler
 f_lr_gamma            = 1.0   # fraction to cut lr every f_lr_step_size used by scheduler (set to 1.0 to not cut)
-f_n_hidden            = 2     # how many hidden layers in first network
-f_n_neurons           = 16    # how many neurons per hidden layer in first network
-# ***********************************************************************
+# Note: the n_out_neurons1 value is set below and is not currently tunable
 n_out_neurons1        = 64    # how many 'outputs' from first network...not tunable at present but could be added
                               # ...can be thought of as an additional hidden layer in the combined network
 f_n_hidden2            = 0    # how many hidden layers in second network
 f_n_neurons2           = 8    # how many neurons per hidden layer in second network if n_hidden2 >= 1
 f_activation_name2     = "Softplus" # activation fct for hidden layers in second network if n_hidden2 >= 1
 
-PATHWAY_ARRAY_LENGTH = 1  # The length of the subarray which represent one pathway node
-NUMBER_OF_COVARIATES = 16 # The number of covariates for pathway as intermediate model and they are the columns at the left side of the input file
+# t_: if tune=True...Tuning set of hyperparameters to be considered by Optuna
+t_n_trials            = 100 # how many trials to run
+n_epochs_trial        = 50  # how many epochs during optuna trial phase?
+# structures of the main network to sample and if use_study, the second network
+t_nHidden_lo          = 1       # sampled
+t_nHidden_hi          = 3
+t_nNeurons_lo         = 8       # sampled
+t_nNeurons_hi         = 512
+t_n_hidden2           = 0   # how many hidden layers in second (study+) network (zero will use study as bias parms)
+t_n_neurons2          = 8   # how many neurons per hidden layer in second network (irrelevant if hidden2=0)
+# optimization parameter ranges to try
+t_activation_name     = ['relu', 'leaky_relu', 'elu']
+tLR_lo                = 0.001  # learning rate  values will be log sampled on this range
+tLR_hi                = 0.1
+tDrop_lo              = 0.05   # dropout  values sampled on this range
+tDrop_hi              = 0.4
+t_weight_init         = ['None']  # 'kaiming_uniform'
+tBatch_lo             = 16      # sampled on this range
+tBatch_hi             = 64
+t_weight_decay        = [0, 1e-4, 1e-3]     # this should be numbers representing categories to try
+
+# ***********************************************************************
+# End of User Inputs 
+# ***********************************************************************
 
 # set device to gpu if it exists or to cpu otherwise
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -85,7 +94,7 @@ print(device)
 
 # function to read data from above input file
 
-def readData(dir,file):
+def readData(dir,file,datatype):
     # ************** Data input and preprocessing **************
     # set data up for linear  regression and NN
     # First read in all the data from the csv file
@@ -93,9 +102,10 @@ def readData(dir,file):
     df = pd.read_csv(f"{dir}{file}")
 
     # Print the resulting dataframe
+    print(f"data type: {datatype}")
     print(f"head: {df.head()}")
     print(f"tail: {df.tail()}")
-    print(f"shape: {df.shape}") #  Full data has 63,253 subjects which agrees w/ SAS
+    print(f"shape: {df.shape}")
     print(f"describe: {df.describe()}")
     print(f"columns: {df.columns}")
     print(f"dtypes: {df.dtypes}")
@@ -130,11 +140,6 @@ def get_Xten_yten(indf):
 
     # pick one for target outcome
     ycol  = ["y"]
-
-
-
-
-
 
     # choose which variables to include in this run (ctrl O/ to comment a block of code)
     xcols = ['e', 'z', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']
@@ -182,7 +187,6 @@ def trainValTest(Xten, yten, testsize, valsize):
     print(f"y_test.shape : {y_test.shape}")
 
     return X_train, X_val, X_test, y_train, y_val, y_test
-
 
 def getPerformanceBinary(method,actuals,predictions,probabilities):
     accuracy = accuracy_score(actuals, predictions)
@@ -298,7 +302,7 @@ class CustomDataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 # *** Read Data ***
-indf = readData(datadir,filename)
+indf = readData(datadir,allData)
 
 def split_columns(indf, cols):
     for col in cols:
