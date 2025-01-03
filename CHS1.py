@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, ConcatDataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
                              mean_squared_error, r2_score)
@@ -21,13 +21,19 @@ import shap
 
 # Data-related input and preparation
 datadir         = "C:/jim/Sab/CHS/"
-trainTestData   = True # input separate train/test data
+inputAllData    = False # input separate train/test data
 trainData       = 'CHSTrain.csv' # train and test data if trainTestData=True
 testData        = 'CHSTest.csv'
 allData         = 'CHS.csv' # all data if trainTestData=False
 testSize        = 0.1  # if trainTestData=False, what fraction of allData allocated to testing?
 valSize         = 0.1  # what fraction of training data allocated to validation
 binary_outcome  = False  # True or False (capitalized)
+ylist           = ['lfe']
+elist           = ['t', 'rht', 'rbmi', 'ri', 'ttasthma', 'exer', 'smokyear', 'yasthma', 'male', 'racea',
+                   'raceb', 'raced', 'racem', 'raceo', 'hispd', 'hisph']
+tempglist       = []
+xAI_list1       = ['male']              # for use in shap intxn calculations
+xAI_list2       = ['t','rht','yasthma'] # for use in shap intxn calculations
 outFileBase     = "CHS1"
 codeCodom       = False  # additively coded g in input data will be recoded into two codom indicators in split_columns
 use_study       = False # Include study indicators?  If so, 2-component network will be used (simpleNN_2)
@@ -46,7 +52,7 @@ f_n_hidden            = 2     # how many hidden layers in first network
 f_n_neurons           = 16    # how many neurons per hidden layer in first network
 f_activation_name     = "Linear" # no activation...should approximate logistic or linear regression
 f_activation_name     = "Softplus" # activation fct for hidden layers in first network
-n_epochs_test         = 200  # how many epochs during final training/testing phase?
+f_n_epochs            = 200  # how many epochs during final training/testing phase?
 batchsize_test        = 512   # how many per batch for test evaluation (ignored for all training)
 ranNum                = 123  # Initial seed value for random number generator
 f_dropout_rate        = 0.25
@@ -92,14 +98,33 @@ t_weight_decay        = [0, 1e-4, 1e-3]     # this should be numbers representin
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(device)
 
-# function to read data from above input file
 
+# create codominant coding of genotypes.  cols input is list of genotype labels.
+# output return are updated versions of indf dataframe and glist
+def split_columns(indf, cols):
+    new_glist = []
+    for col in cols:
+        if col in indf.columns:
+            indf[f'{col}_1'] = indf[col].apply(lambda x: 1 if x == 1 else 0)
+            indf[f'{col}_2'] = indf[col].apply(lambda x: 1 if x == 2 else 0)
+            indf.drop(columns=[col], inplace=True)
+            new_glist = new_glist + [f'{col}_1']
+            new_glist = new_glist + [f'{col}_2']
+    return indf, new_glist
+
+# function to read data from above input file
 def readData(dir,file,datatype):
     # ************** Data input and preprocessing **************
     # set data up for linear  regression and NN
     # First read in all the data from the csv file
     # read data into dataframe...'infer' option reads variable names from first line
     df = pd.read_csv(f"{dir}{file}")
+
+    global glist
+    if codeCodom:
+        df, glist = split_columns(df, tempglist)
+    else:
+        glist = tempglist
 
     # Print the resulting dataframe
     print(f"data type: {datatype}")
@@ -109,17 +134,36 @@ def readData(dir,file,datatype):
     print(f"describe: {df.describe()}")
     print(f"columns: {df.columns}")
     print(f"dtypes: {df.dtypes}")
-
+    # Jim added block below to optionally recode g using Mingzhi's split_columns function
+    '''
+    if codeCodom:
+        # Jim this is configured for our 10-snp simulation...needs to be generalized if using other setups
+        col2change = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']
+        # Following written by Mingzhi to split additive g into codominant before setting xcol
+        indf = split_columns(indf, col2change)
+        # following re-set for use in setting xcol in get_Xten_yten and for shap interaction code
+        gene_list = ['g1_1', 'g1_2', 'g2_1', 'g2_2', 'g3_1', 'g3_2', 'g4_1',
+                     'g4_2', 'g5_1', 'g5_2', 'g6_1', 'g6_2', 'g7_1', 'g7_2', 'g8_1', 'g8_2',
+                     'g9_1', 'g9_2', 'g10_1', 'g10_2']
+    '''
     # use df.columns to get list of variable names...then block copy into list below
     return df
 
+# function to create ycol and xcols
+def get_yx(y,e,g):
+    ycol = y
+    xcols = e + g
+    n_x = len(xcols)
+    print(f"numy        : {len(ycol)}")
+    print(f"numX        : {n_x}")
+    print(f"X           : {xcols}")
+    return ycol, xcols, n_x
+
 # function to input dataframe and return X,y numpy arrays and X,y torch tensors. Used by get_Xten_yten function
-def dfToTensor(df, xcols, ycol):
+def dfToTensor(label, df, xcols, ycol):
     global y_sd  # Jim added this
     global y_L1_d
     # Create tensors X and y from dataframe
-    print("xcols")
-    print(xcols)
     X = df[xcols].values  # numpy arrays
     y = df[ycol].values
     y_sd = np.std(y)  # Jim added this
@@ -128,41 +172,17 @@ def dfToTensor(df, xcols, ycol):
     # Reshape y to be a column vector. -1 says figure out how many rows; 1 says make it 1 column
     # Mingzhi, why do we need to use the view for y but not X?
     y = torch.tensor(y, dtype=torch.float32).view(-1, 1)
-    return X, y
+    print(f"*** Converting {label} data to tensors ***")
+    # following converts N, 1 array to a vector of N elements
+    yvec = y.ravel()
+    print(f"   Counts of y : {pd.Series(yvec).value_counts()}")
+    # create dummy tensor used only to apply .shape[1] to get firstnumX for use below
+    print(f"   Mean of y   : {np.mean(y)}")
+    print(f"   SD of y     : {y_sd}")
+    print(f"   L1_d of y   : {y_L1_d}")
+    return X, y, y_sd, y_L1_d
 
 # function to generate tensors from df
-def get_Xten_yten(indf):
-    # declare numbers of x and y elements to be global
-    global n_x,n_x2,n_x3,n_y
-    global XAI_list
-
-    # indf = pd.get_dummies(indf, columns=['agecat'], dtype=int)
-
-    # pick one for target outcome
-    ycol  = ["y"]
-
-    # choose which variables to include in this run (ctrl O/ to comment a block of code)
-    xcols = ['e', 'z', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']
-
-    n_x  = len(xcols)
-    n_y  = len(ycol)
-    print(f"numy        : {n_y}")
-    print(f"numX        : {n_x}")
-    print(f"X           : {xcols}")
-
-    # create tensors from input df and desired x and y variables
-    Xten, yten = dfToTensor(indf, xcols, ycol)
-    # get counts of y
-    # following converts tensor to a numpy array with dimensions N,1 (where N is number of subjects)
-    yarr = yten.cpu().numpy()
-    # following converts N, 1 array to a vector of N elements
-    yarr = yarr.ravel()
-    # following needs vector of N elements as input
-    print(f"Counts of y : {pd.Series(yarr).value_counts()}")
-    # create dummy tensor used only to apply .shape[1] to get firstnumX for use below
-    print(f"Mean of y   : {np.mean(yten.detach().cpu().numpy())}")
-
-    return Xten, yten, xcols
 
 # function to split X and y into train, validation, and test sets
 def trainValTest(Xten, yten, testsize, valsize):
@@ -288,7 +308,7 @@ def runLogistic(Xfit,yfit,Xtest,ytest,label):
     perfLR = getPerformanceBinary("LR",ytest,y_pred,y_pred_proba)
     return model, perfLR
 
-# required by Pytorch
+# *** Define classes that will be used in NN ***
 class CustomDataset(Dataset):
     # 'features' below are the X values; 'labels' are the y values
     def __init__(self, features, labels):
@@ -300,213 +320,6 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.features[idx], self.labels[idx]
-
-# *** Read Data ***
-indf = readData(datadir,allData)
-
-def split_columns(indf, cols):
-    for col in cols:
-        if col in indf.columns:
-            indf[f'{col}_1'] = indf[col].apply(lambda x: 1 if x == 1 else 0)
-            indf[f'{col}_2'] = indf[col].apply(lambda x: 1 if x == 2 else 0)
-            indf.drop(columns=[col], inplace=True)
-    return indf
-
-# Jim added block below to optionally recode g using Mingzhi's split_columns function
-if codeCodom:
-    # Jim this is configured for our 10-snp simulation...needs to be generalized if using other setups
-    col2change = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']
-    # Following written by Mingzhi to split additive g into codominant before setting xcol
-    indf = split_columns(indf, col2change)
-    # following re-set for use in setting xcol in get_Xten_yten and for shap interaction code
-    gene_list = ['g1_1', 'g1_2', 'g2_1', 'g2_2', 'g3_1', 'g3_2', 'g4_1',
-                 'g4_2', 'g5_1', 'g5_2', 'g6_1', 'g6_2', 'g7_1', 'g7_2', 'g8_1', 'g8_2',
-                 'g9_1', 'g9_2', 'g10_1', 'g10_2']
-
-# abstract desired X and y variables for this analysis and create X and y tensors
-Xten,yten,xcols = get_Xten_yten(indf)
-
-# create training, validation, and testing tensors from X and y datasets
-X_train, X_val, X_test, y_train, y_val, y_test = trainValTest(Xten, yten, testSize, valSize)
-
-# put data on device
-X_train, X_val, X_test = X_train.to(device), X_val.to(device), X_test.to(device)
-y_train, y_val, y_test = y_train.to(device), y_val.to(device), y_test.to(device)
-
-# threshold = (sum(yten == 1)/len(yten)).item() # set threshold= '# of 1/sample size' for prediction, used for both NN and logistic reg
-# following is proportino of cases in whole sample.  we actually want the proportion in the sample being evaluated
-# for accuracy etc.
-test_threshold = (sum(yten == 1)/len(yten)).item() # set threshold= '# of 1/sample size' for prediction, used for both NN and logistic reg
-test_threshold = 1 - (sum(y_test == 1)/len(y_test)).item()  # set threshold= '# of 1/sample size' for prediction, used for both NN and logistic reg
-test_threshold = 0.5  # Jim which one to use?
-print(f"test threshold={test_threshold}")
-
-# ************** End Data input and preprocessing **************
-def getSHAP_Main(model_type,model,X, y_sd, xcols, baseline):
-    print(f"computing shap Main for {model_type}")
-    # convert tensor to numpy array
-    if model_type=='LR':
-        X = X.cpu().numpy()  # input X is tensor...convert to array
-        # get number of subjects in X
-        baseline_numpy = baseline.detach().cpu().numpy()
-        masker = shap.maskers.Independent(baseline_numpy)
-
-        explainer = shap.LinearExplainer(model, masker)
-        shap_values = explainer.shap_values(X)
-        LR_shapL1 = np.mean(np.abs(shap_values), axis=0) / y_sd
-        LR_shapL2 = np.sqrt(np.mean(shap_values * shap_values, axis=0)) / y_sd
-
-        # Convert to DataFrame for better readability
-        list_of_tuples = list(zip(xcols, LR_shapL1, LR_shapL2))
-        result = pd.DataFrame(list_of_tuples, columns=['Feature', 'LR_ShapL1', 'LR_ShapL2'])
-    elif model_type=='NN':
-        model.to(device)
-        model.eval()  # Set the model to evaluation mode
-        explainer = shap.DeepExplainer(model, baseline)
-
-        # Initialize an array to COLLECT feature importance
-        shap_values = []
-
-        # Calculate SHAP values for each batch in the test loader
-        for batch_features, _ in X:
-            batch_features = batch_features.to(device)
-
-            # Calculate SHAP values for the batch
-            shap_batch = explainer.shap_values(batch_features, check_additivity=False)
-            shap_batch = shap_batch.squeeze(-1)
-            shap_values.append(shap_batch)  # Jim added squaring of shap_value here
-
-        # Convert list of SHAP values to numpy array and average across all samples
-        shap_values = np.concatenate(shap_values, axis=0)
-
-        NN_shapL1 = np.mean(np.abs(shap_values), axis=0) / y_sd
-        NN_shapL2 = np.sqrt(np.mean(shap_values * shap_values, axis=0)) / y_sd  # jim added this
-
-        # Convert to DataFrame for better readability
-        list_of_tuples = list(zip(xcols, NN_shapL1, NN_shapL2))
-        result = pd.DataFrame(list_of_tuples, columns=['Feature', 'NN_ShapL1', 'NN_ShapL2'])
-
-    print(f"done with shap Main for {model_type}")
-    return result
-
-def get_shap_interaction_adjusted(i, j, model, model_type, norm_type, y_sd, data_loader, baseline, device):  # baseline should be a tensor
-    # a=True
-    # Initialize the SHAP DeepExplainer with the model and background data
-    if model_type=="LR":         # baseline should be a tensor
-        baseline_numpy = baseline.detach().cpu().numpy()
-        masker = shap.maskers.Independent(baseline_numpy)
-        explainer = shap.LinearExplainer(model, masker)
-        baseline = baseline[:].to(device)
-
-    elif model_type=="NN":           # baseline should be a tensor
-        explainer = shap.DeepExplainer(model, baseline)
-        baseline = baseline[:].to(device)
-
-    interaction_values = []
-    for batch_features, _ in data_loader:
-        batch_features = batch_features.to(device)
-        batch_size = batch_features.size(0)
-
-        # Ensure the batch size matches the baseline
-        current_baseline = baseline[:batch_size]
-
-        # SHAP values with feature i set to baseline
-        features_i_baseline = batch_features.clone()
-        features_i_baseline[:, i] = current_baseline[:, i]
-
-        # SHAP values with feature j set to baseline
-        features_j_baseline = batch_features.clone()
-        features_j_baseline[:, j] = current_baseline[:, j]
-
-        if model_type == "LR":
-            shap_values_full = explainer.shap_values(batch_features)
-            shap_values_i_baseline = explainer.shap_values(features_i_baseline)
-            shap_values_j_baseline = explainer.shap_values(features_j_baseline)
-
-        elif model_type == "NN":
-            shap_values_full = explainer.shap_values(batch_features, check_additivity=False)
-            shap_values_i_baseline = explainer.shap_values(features_i_baseline, check_additivity=False)
-            shap_values_j_baseline = explainer.shap_values(features_j_baseline, check_additivity=False)
-
-            shap_values_full=shap_values_full.squeeze(-1)
-            shap_values_i_baseline = shap_values_i_baseline.squeeze(-1)
-            shap_values_j_baseline = shap_values_j_baseline.squeeze(-1)
-
-        interaction_value = (
-                    shap_values_full[:,i] + shap_values_full[:,j]  - shap_values_i_baseline[:,j] - shap_values_j_baseline[:,i])
-        interaction_values.append(interaction_value)
-
-    # Concatenate and compute the mean interaction values
-    interaction_values = np.concatenate(interaction_values, axis=0)
-    if norm_type == 'L1':
-        mean_interaction_values = np.mean(np.abs(interaction_values), axis=0) / y_sd
-    if norm_type == 'L2':
-        mean_interaction_values = np.sqrt(np.mean(interaction_values * interaction_values, axis=0)) / y_sd
-    return mean_interaction_values
-
-# function to get shap interaction results based on Mingzhi's latest code
-def getSHAP_Intxn(model_type, norm_type, model,X,Xlist1,Xlist2,y_sd,baseline, dic, device):
-    # Note: Data sent to Xlist1 and Xlist2 should be shapIntxnV1 and shapIntxnV2 defined above
-
-    print(f"computing shap Intxn for {model_type}")
-    interaction_matrix = pd.DataFrame(index=Xlist1, columns=Xlist2)
-    label = []
-    label.append(model_type)
-    dflabel = pd.DataFrame(label)
-
-    for i in range(len(Xlist1)):
-        for j in range(len(Xlist2)):
-            interaction_shap = get_shap_interaction_adjusted(dic[Xlist1[i]], dic[Xlist2[j]], model, model_type, norm_type, y_sd, X, baseline, device)
-            interaction_matrix.loc[Xlist1[i], Xlist2[j]] = interaction_shap
-    # interaction_matrix.to_csv(output_csv_path, index=True)
-    result = pd.concat([dflabel, interaction_matrix])
-    print(f"done with shap Intxn for {model_type}")
-    return result
-
-def get_sample(data_loader, sample_size):
-    all_features = []
-    for batch_features, batch_labels in data_loader:
-        all_features.append(batch_features)
-
-    all_features = torch.cat(all_features, dim=0)
-
-    if sample_size > all_features.size(0):
-        raise ValueError("Sample size exceeds the total number of rows in combined_loader!")
-    indices = torch.randperm(all_features.size(0))[:sample_size]
-    sampled_features = all_features[indices]
-    return sampled_features
-
-# ************** Run Standard Regression  **************
-# Run 1: Fit/eval on full/full data to cross-check with SAS
-# Run 2: Fit/eval on train/test data for comparison with NN
-if binary_outcome:
-    modelFull, perf_LRfull   = runLogistic(Xten,yten,Xten,yten,'full data')
-    modelTrain, perf_LRtest  = runLogistic(X_train,y_train,X_test,y_test,'train/test')
-else:
-    modelFull, perf_LRfull  = runLinear(Xten,yten,Xten,yten,'full data')
-    modelTrain, perf_LRtest = runLinear(X_train,y_train,X_test,y_test,'train/test')
-
-from torch.utils.data import ConcatDataset, DataLoader
-
-train_dataset = CustomDataset(X_train, y_train)
-val_dataset = CustomDataset(X_val, y_val)
-test_dataset = CustomDataset(X_test, y_test)
-train_loader = DataLoader(train_dataset, batch_size=batchsize_test, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batchsize_test, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=batchsize_test, shuffle=False)
-
-combined_dataset = ConcatDataset([train_dataset, val_dataset, test_dataset])
-
-combined_loader = DataLoader(combined_dataset, batch_size=batchsize_test, shuffle=False)
-baseline = get_sample(combined_loader, 1000)
-
-shapMain_LR = getSHAP_Main('LR',modelTrain,X_train, y_sd, xcols, baseline)
-
-# ************** End: Standard Regression  **************
-
-# ************** Run Neural Network Analysis **************
-print("*** Neural Network ***")
-# *** Define classes that will be used in NN ***
 
 class ActivationFunction(nn.Module):
     def __init__(self, activation_name, **kwargs):
@@ -531,7 +344,6 @@ class ActivationFunction(nn.Module):
 
     def forward(self, x):
         return self.activation(x)
-
 
 # set up single network
 class SimpleNN(nn.Module):
@@ -566,22 +378,6 @@ def readPathwayLists(path):
     grouped_list=list(grouped_df["snp"].values)
     return grouped_list
 
-grouped_list_indices = []
-if PATHWAY_AS_INTERMEDIATE:
-    grouped_list = readPathwayLists(Path2Pathway_File)
-    col_name_to_index = {name: idx for idx, name in enumerate(xcols)}
-    # Convert column names in grouped_list to column indices
-    grouped_list_indices = [[col_name_to_index[col] for col in sublist] for sublist in grouped_list]
-
-
-# ******** Step 1: Use optuna to optimize NN over hyper parameters  **************
-# Dictionary that maps the activation function names to actual PyTorch functions
-activations = {
-    'relu': F.relu,
-    'leaky_relu': F.leaky_relu,
-    'elu': F.elu,
-    'softplus': F.softplus,
-}
 def objective(trial):
     # Hyperparameters to be tuned by Optuna
     dropout_rate = trial.suggest_float('dropout_rate', tDrop_lo, tDrop_hi)
@@ -597,10 +393,8 @@ def objective(trial):
     n_hidden = trial.suggest_int('n_hidden', t_nHidden_lo, t_nHidden_hi)
     n_neurons = trial.suggest_int('n_neurons', t_nNeurons_lo, t_nNeurons_hi)
 
-
     model = SimpleNN(dropout_rate=dropout_rate, n_hidden=n_hidden, n_neurons=n_neurons,
                              activation_function=activation_function)
-
 
     model.to(device)
     # if(weight_init == 'kaiming_uniform'):
@@ -665,7 +459,8 @@ def objective(trial):
 
     return best_trial_val_loss  # Use optuna to optimize this
 
-def applyToTestData(model,test_loader):
+# Get performance of NN
+def getNNPerformance(model, test_loader):
     print("*** NN Performance ***")
     predictions = []
     actuals = []
@@ -695,7 +490,311 @@ def applyToTestData(model,test_loader):
         perfNN = getPerformanceContinuous("NN",np.array(actuals),np.array(predictions))
     return perfNN
 
-# decide whether to do full training or just run a single training based on fixed hyperparms
+# *** NN analysis to obtain final model
+def runNNFinal(X_train, y_train, X_val, y_val, dropout_rate, n_hidden, n_neurons, activation_function,
+           lr_init, weight_decay):
+    model = SimpleNN(dropout_rate=dropout_rate, n_hidden=n_hidden, n_neurons=n_neurons,
+                 activation_function=activation_function)
+    model.to(device)
+    num_epochs = f_n_epochs
+    optimizer  = optim.Adam(model.parameters(), lr=lr_init, weight_decay=weight_decay)
+    scheduler  = optim.lr_scheduler.StepLR(optimizer, step_size=f_lr_step_size, gamma=f_lr_gamma)
+    if binary_outcome:
+        criterion = nn.BCELoss()
+        # BCEWithLogitsLoss(reduction='mean'):  combines a Sigmoid layer and the BCELoss in one single class.
+    else:
+        criterion = nn.MSELoss()
+
+    train_dataset = CustomDataset(X_train, y_train)
+    val_dataset   = CustomDataset(X_val, y_val)
+    train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader    = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    best_trial_val_loss = float('inf')
+    best_epoch = 0
+    train_losses, val_losses = [], []
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        for batch_features, batch_labels in train_loader:
+            batch_labels = batch_labels.to(device)
+            batch_features = batch_features.to(device)
+            optimizer.zero_grad()
+            outputs = model(batch_features)
+            loss = criterion(outputs, batch_labels)
+            train_loss += loss.item()
+            loss.backward()
+            optimizer.step()
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
+        scheduler.step()  # update learning rate if epoch is a multiple of scheduler step_size
+
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch_features, batch_labels in val_loader:
+                batch_labels = batch_labels.to(device)
+                batch_features = batch_features.to(device)
+                outputs = model(batch_features)
+                loss = criterion(outputs, batch_labels)
+                val_loss += loss.item()
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+
+        if val_loss < best_trial_val_loss:
+            best_trial_val_loss = val_loss  # Update the best validation loss if the current one is lower
+            torch.save(model.state_dict(), 'best_model.pth')  # Save the best model
+            best_epoch = epoch  # store which epoch gave the best model
+
+        # JIM...add code to store epoch values for plotting
+        if epoch % 10 == 0:
+            print('Epoch-{0} lr: {1}'.format(epoch+1, optimizer.param_groups[0]['lr']))
+            print(f"Epoch {epoch + 1}/{num_epochs} .. Train Loss: {train_loss} .. Test Loss: {val_loss} ")
+        if epoch == num_epochs - 1:
+            print('Epoch-{0} lr: {1}'.format(epoch+1, optimizer.param_groups[0]['lr']))
+            print(f"Epoch {epoch + 1}/{num_epochs} .. Train Loss: {train_loss} .. Test Loss: {val_loss} ")
+
+    print("Final training done")
+    print(f"Best model came from epoch: {best_epoch}")
+    plt.plot(range(num_epochs), train_losses, label='Training Loss', color='blue')
+    plt.plot(range(num_epochs), val_losses, label='Validation Loss', color='red')
+    plt.ylabel("Loss/Error")
+    plt.xlabel("Epoch")
+    plt.legend()
+    plt.show()
+
+# compute shap values based on final model
+# function to draw random sample for use by shap
+def get_sample(data_loader, sample_size):
+    all_features = []
+    for batch_features, batch_labels in data_loader:
+        all_features.append(batch_features)
+
+    all_features = torch.cat(all_features, dim=0)
+
+    if sample_size > all_features.size(0):
+        raise ValueError("Sample size exceeds the total number of rows in combined_loader!")
+    indices = torch.randperm(all_features.size(0))[:sample_size]
+    sampled_features = all_features[indices]
+    return sampled_features
+
+def getSHAP_Main(model_type,model,X, y_sd, y_L1_d, xcols, baseline):
+    print(f"computing shap Main for {model_type}")
+    # convert tensor to numpy array
+    if model_type=='LR':
+        X = X.cpu().numpy()  # input X is tensor...convert to array
+        # get number of subjects in X
+        baseline_numpy = baseline.detach().cpu().numpy()
+        masker = shap.maskers.Independent(baseline_numpy)
+
+        explainer = shap.LinearExplainer(model, masker)
+        shap_values = explainer.shap_values(X)
+        LR_shapL1 = np.mean(np.abs(shap_values), axis=0) / y_L1_d
+        LR_shapL2 = np.sqrt(np.mean(shap_values * shap_values, axis=0)) / y_sd
+
+        # Convert to DataFrame for better readability
+        list_of_tuples = list(zip(xcols, LR_shapL1, LR_shapL2))
+        result = pd.DataFrame(list_of_tuples, columns=['Feature', 'LR_ShapL1', 'LR_ShapL2'])
+    elif model_type=='NN':
+        model.to(device)
+        model.eval()  # Set the model to evaluation mode
+        explainer = shap.DeepExplainer(model, baseline)
+
+        # Initialize an array to COLLECT feature importance
+        shap_values = []
+
+        # Calculate SHAP values for each batch in the test loader
+        for batch_features, _ in X:
+            batch_features = batch_features.to(device)
+
+            # Calculate SHAP values for the batch
+            shap_batch = explainer.shap_values(batch_features, check_additivity=False)
+            shap_batch = shap_batch.squeeze(-1)
+            shap_values.append(shap_batch)  # Jim added squaring of shap_value here
+
+        # Convert list of SHAP values to numpy array and average across all samples
+        shap_values = np.concatenate(shap_values, axis=0)
+
+        # Jim, correct to use y_L1_d for shapL1 calc?
+        NN_shapL1 = np.mean(np.abs(shap_values), axis=0) / y_L1_d
+        NN_shapL2 = np.sqrt(np.mean(shap_values * shap_values, axis=0)) / y_sd  # jim added this
+
+        # Convert to DataFrame for better readability
+        list_of_tuples = list(zip(xcols, NN_shapL1, NN_shapL2))
+        result = pd.DataFrame(list_of_tuples, columns=['Feature', 'NN_ShapL1', 'NN_ShapL2'])
+
+    print(f"done with shap Main for {model_type}")
+    return result
+
+# function to get shap interaction results based on Mingzhi's latest code
+def getSHAP_Intxn(model_type, norm_type, model,X,Xlist1,Xlist2,y_sd,baseline, dic, device):
+    # Note: Data sent to Xlist1 and Xlist2 should be shapIntxnV1 and shapIntxnV2 defined above
+
+    print(f"computing shap Intxn for {model_type}")
+    interaction_matrix = pd.DataFrame(index=Xlist1, columns=Xlist2)
+    label = []
+    label.append(model_type)
+    dflabel = pd.DataFrame(label)
+
+    for i in range(len(Xlist1)):
+        for j in range(len(Xlist2)):
+            interaction_shap = get_shap_interaction_adjusted(dic[Xlist1[i]], dic[Xlist2[j]], model, model_type, norm_type, y_sd, X, baseline, device)
+            interaction_matrix.loc[Xlist1[i], Xlist2[j]] = interaction_shap
+    # interaction_matrix.to_csv(output_csv_path, index=True)
+    result = pd.concat([dflabel, interaction_matrix])
+    print(f"done with shap Intxn for {model_type}")
+    return result
+
+# Prior function for getting shap interaction results...Jim delete this one?
+def get_shap_interaction_adjusted(i, j, model, model_type, norm_type, y_sd, data_loader, baseline, device):  # baseline should be a tensor
+    # a=True
+    # Initialize the SHAP DeepExplainer with the model and background data
+    if model_type=="LR":         # baseline should be a tensor
+        baseline_numpy = baseline.detach().cpu().numpy()
+        masker = shap.maskers.Independent(baseline_numpy)
+        explainer = shap.LinearExplainer(model, masker)
+        baseline = baseline[:].to(device)
+
+    elif model_type=="NN":           # baseline should be a tensor
+        explainer = shap.DeepExplainer(model, baseline)
+        baseline = baseline[:].to(device)
+
+    interaction_values = []
+    for batch_features, _ in data_loader:
+        batch_features = batch_features.to(device)
+        batch_size = batch_features.size(0)
+
+        # Ensure the batch size matches the baseline
+        current_baseline = baseline[:batch_size]
+
+        # SHAP values with feature i set to baseline
+        features_i_baseline = batch_features.clone()
+        features_i_baseline[:, i] = current_baseline[:, i]
+
+        # SHAP values with feature j set to baseline
+        features_j_baseline = batch_features.clone()
+        features_j_baseline[:, j] = current_baseline[:, j]
+
+        if model_type == "LR":
+            shap_values_full = explainer.shap_values(batch_features)
+            shap_values_i_baseline = explainer.shap_values(features_i_baseline)
+            shap_values_j_baseline = explainer.shap_values(features_j_baseline)
+
+        elif model_type == "NN":
+            shap_values_full = explainer.shap_values(batch_features, check_additivity=False)
+            shap_values_i_baseline = explainer.shap_values(features_i_baseline, check_additivity=False)
+            shap_values_j_baseline = explainer.shap_values(features_j_baseline, check_additivity=False)
+
+            shap_values_full=shap_values_full.squeeze(-1)
+            shap_values_i_baseline = shap_values_i_baseline.squeeze(-1)
+            shap_values_j_baseline = shap_values_j_baseline.squeeze(-1)
+
+        interaction_value = (
+                    shap_values_full[:,i] + shap_values_full[:,j]  - shap_values_i_baseline[:,j] - shap_values_j_baseline[:,i])
+        interaction_values.append(interaction_value)
+
+    # Concatenate and compute the mean interaction values
+    interaction_values = np.concatenate(interaction_values, axis=0)
+    if norm_type == 'L1':
+        mean_interaction_values = np.mean(np.abs(interaction_values), axis=0) / y_sd
+    if norm_type == 'L2':
+        mean_interaction_values = np.sqrt(np.mean(interaction_values * interaction_values, axis=0)) / y_sd
+    return mean_interaction_values
+
+# *********** Main Program ***********
+
+# *** Read Data and if reading full dataset, split into train/test
+print("Reading and processing data")
+if inputAllData:
+    train_df = readData(datadir,trainData)
+    test_df  = readData(datadir,testData)
+else:
+    all_df = readData(datadir,allData)
+    # generate train and test dataframes
+    train_df,test_df = train_test_split(all_df,test_size=testSize,shuffle=True, random_state=ranNum)
+
+# *** Generate training and validation dataset
+train_df, val_df = train_test_split(train_df,test_size=valSize,shuffle=True)
+
+# *** Declare X and y and compute number of input variables in X
+ycol, xcols, n_x = get_yx(ylist, elist, glist)
+
+# *** Generate tensors for train, test, val data, and optionally for all data
+X_train, y_train, ysd_train, yL1_train = dfToTensor("Train",train_df, xcols, ycol)
+X_test, y_test, ysd_test, yL1_test     = dfToTensor("Test", test_df, xcols,ycol)
+X_val, y_val, ysd_val, yL1_val         = dfToTensor("Val", val_df, xcols,ycol)
+if inputAllData:
+    X_all, y_all, ysd_all, yL1_all     = dfToTensor("All", all_df, xcols, ycol)
+
+# *** Put data on device
+X_train, X_val, X_test = X_train.to(device), X_val.to(device), X_test.to(device)
+y_train, y_val, y_test = y_train.to(device), y_val.to(device), y_test.to(device)
+
+# *** Create loaders for train, val, and test data
+train_dataset    = CustomDataset(X_train, y_train)
+val_dataset      = CustomDataset(X_val, y_val)
+test_dataset     = CustomDataset(X_test, y_test)
+train_loader     = DataLoader(train_dataset, batch_size=batchsize_test, shuffle=True)
+val_loader       = DataLoader(val_dataset, batch_size=batchsize_test, shuffle=False)
+test_loader      = DataLoader(test_dataset, batch_size=batchsize_test, shuffle=False)
+combined_dataset = ConcatDataset([train_dataset, val_dataset, test_dataset])
+combined_loader  = DataLoader(combined_dataset, batch_size=batchsize_test, shuffle=False)
+
+# Jim move this to binary-specific analysis section?
+if binary_outcome:
+    # threshold = (sum(yten == 1)/len(yten)).item() # set threshold= '# of 1/sample size' for prediction, used for both NN and logistic reg
+    # following is proportion of cases in whole sample.  we actually want the proportion in the sample being evaluated
+    # for accuracy etc.
+    test_threshold = (sum(y_all == 1)/len(y_all)).item() # set threshold= '# of 1/sample size' for prediction, used for both NN and logistic reg
+    test_threshold = 1 - (sum(y_test == 1)/len(y_test)).item()  # set threshold= '# of 1/sample size' for prediction, used for both NN and logistic reg
+    test_threshold = 0.5  # Jim which one to use?
+    print(f"test threshold={test_threshold}")
+
+# ************** End Data input and preprocessing **************
+
+# ************** Run Standard Regression  **************
+# Run 1: Fit/eval on full/full data to cross-check with SAS
+# Run 2: Fit/eval on train/test data for comparison with NN
+print("*** Standard Regression ***")
+if binary_outcome:
+    if inputAllData:
+        runLogistic(X_all,y_all,X_all,y_all,'full data')
+    modelTrain, perf_LRtest = runLogistic(X_train, y_train, X_test, y_test, 'train/test')
+else:
+    if inputAllData:
+        runLinear(X_all,y_all,X_all,y_all,'full data')
+    modelTrain, perf_LRtest = runLinear(X_train, y_train, X_test, y_test, 'train/test')
+
+# compute shap for standard regression
+# Jim use train data for computing shap?
+num_baseline = min(1000, len(y_train))
+baseline = get_sample(train_loader, num_baseline)
+shapMain_LR = getSHAP_Main('LR', modelTrain, X_train, ysd_train, yL1_train, xcols, baseline)
+print("*** Done with standard regression ***")
+
+# ************** End: Standard Regression  **************
+
+# ************** Run Neural Network Analysis **************
+print("*** Neural Network ***")
+
+# *** Set up some additional structures (Jim, move elsewhere?)
+grouped_list_indices = []
+if PATHWAY_AS_INTERMEDIATE:
+    grouped_list = readPathwayLists(Path2Pathway_File)
+    col_name_to_index = {name: idx for idx, name in enumerate(xcols)}
+    # Convert column names in grouped_list to column indices
+    grouped_list_indices = [[col_name_to_index[col] for col in sublist] for sublist in grouped_list]
+
+# Dictionary that maps the activation function names to actual PyTorch functions
+activations = {
+    'relu': F.relu,
+    'leaky_relu': F.leaky_relu,
+    'elu': F.elu,
+    'softplus': F.softplus,
+}
+
+# *** Decide whether to do full optimization or just run a single training based on fixed hyperparms
 if tune:
     study = optuna.create_study(pruner=optuna.pruners.MedianPruner(),direction='minimize')
     # set ntrials to 1/7 of total possible combinations of hyperparms
@@ -728,104 +827,37 @@ else:
     weight_decay         = f_weight_decay
     lr_init              = f_lr_init
 
-# Re-train the model based on optimal hyperparm settings determined above
-# Best parameters: {'dropout_rate': 0.1, 'n_neurons': 64, 'n_hidden': 3,
-# 'activation_function': 'leaky_relu', 'batch_size': 32, 'weight_decay': 0}
-
-print("Retrain the model based on best hyperparms")
-
-model = SimpleNN(dropout_rate=dropout_rate, n_hidden=n_hidden, n_neurons=n_neurons,
-                 activation_function=activation_function)
-
-model.to(device)
-num_epochs = n_epochs_test
-optimizer = optim.Adam(model.parameters(), lr=lr_init, weight_decay=weight_decay)
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=f_lr_step_size, gamma=f_lr_gamma)
-criterion = nn.MSELoss()
-
-train_dataset = CustomDataset(X_train, y_train)
-val_dataset = CustomDataset(X_val, y_val)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
-best_trial_val_loss = float('inf')
-best_epoch = 0
-train_losses, val_losses = [], []
-for epoch in range(num_epochs):
-    model.train()
-    train_loss = 0.0
-    for batch_features, batch_labels in train_loader:
-        batch_labels = batch_labels.to(device)
-        batch_features = batch_features.to(device)
-        optimizer.zero_grad()
-        outputs = model(batch_features)
-        loss = criterion(outputs, batch_labels)
-        train_loss += loss.item()
-        loss.backward()
-        optimizer.step()
-    train_loss /= len(train_loader)
-    train_losses.append(train_loss)
-    scheduler.step()  # update learning rate if epoch is a multiple of scheduler step_size
-
-    # Validation phase
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for batch_features, batch_labels in val_loader:
-            batch_labels = batch_labels.to(device)
-            batch_features = batch_features.to(device)
-            outputs = model(batch_features)
-            loss = criterion(outputs, batch_labels)
-            val_loss += loss.item()
-    val_loss /= len(val_loader)
-    val_losses.append(val_loss)
-
-    if val_loss < best_trial_val_loss:
-        best_trial_val_loss = val_loss  # Update the best validation loss if the current one is lower
-        torch.save(model.state_dict(), 'best_model.pth')  # Save the best model
-        best_epoch = epoch  # store which epoch gave the best model
-
-    # JIM...add code to store epoch values for plotting
-    if epoch % 10 == 0:
-        print('Epoch-{0} lr: {1}'.format(epoch+1, optimizer.param_groups[0]['lr']))
-        print(f"Epoch {epoch + 1}/{num_epochs} .. Train Loss: {train_loss} .. Test Loss: {val_loss} ")
-    if epoch == num_epochs - 1:
-        print('Epoch-{0} lr: {1}'.format(epoch+1, optimizer.param_groups[0]['lr']))
-        print(f"Epoch {epoch + 1}/{num_epochs} .. Train Loss: {train_loss} .. Test Loss: {val_loss} ")
-
-print("Training done")
-plt.plot(range(num_epochs), train_losses, label='Training Loss', color='blue')
-plt.plot(range(num_epochs), val_losses, label='Validation Loss', color='red')
-plt.ylabel("Loss/Error")
-plt.xlabel("Epoch")
-plt.legend()
-plt.show()
+# *** Re-train the model based on optimal/fixed hyperparm settings
+print("Final training of the model based on optimal/fixed hyperparms")
+runNNFinal(X_train, y_train, X_val, y_val, dropout_rate, n_hidden, n_neurons, activation_function,
+           lr_init,weight_decay)
 
 # apply model to test data and get accuracy statistics
 print("Load best model and compute performance on test data")
-print(f"Best model came from epoch: {best_epoch}")
 
 test_dataset = CustomDataset(X_test, y_test)
 test_loader = DataLoader(test_dataset, batch_size=batchsize_test, shuffle=False)
 
 print("Apply the model to the test data")
-# Question:  Do I need to re-declare model since I'm reading model from the external file?
+# Question:  Jim, do I need to re-declare model since I'm reading model from the external file?
 model = SimpleNN(dropout_rate=dropout_rate, n_hidden=n_hidden, n_neurons=n_neurons,
-                activation_function=activation_function)
+                 activation_function=activation_function)
+# Jim do I need to send model to device before reading from external file?
 model.to(device)
 model.load_state_dict(torch.load('best_model.pth'))
 model.to(device)
 model.eval()  # Set the model to evaluation mode
 
 # get performance on test data
-perf_NNtest = applyToTestData(model, test_loader)
+perf_NNtest = getNNPerformance(model, test_loader)
 
 # write performance results
 perf_test = pd.concat([perf_LRtest, perf_NNtest], axis=0)  # concatenate rows
 perf_test.to_csv(f"{outFileBase}_ModelPerformance_Test.csv", index=False)
 
 # get shap for main effects
-shapMain_NN = getSHAP_Main('NN',model,train_loader, y_sd, xcols, baseline)
+# Jim, run shap main on training data?
+shapMain_NN = getSHAP_Main('NN',model, train_loader, ysd_train, yL1_train, xcols, baseline)
 # get shapIntxn_NN for interaction effects (Mingzhi)
 
 # write shap results to csv output file
@@ -840,15 +872,15 @@ for i in range(0,len(xcols)):
     dic[xcols[i]]=i
 
 # get_shap_interaction_adjusted(0, 1, model, "NN", "L2", y_sd, test_loader, baseline,device)
-
-shapIntxn_LR = getSHAP_Intxn("LR", "L2", modelTrain,test_loader,['e', 'z'],['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10'],y_sd,baseline, dic, device)
-shapIntxn_NN = getSHAP_Intxn("NN", "L2", model,test_loader,['e', 'z'],['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10'],y_sd,baseline, dic, device)
+# Jim: get shap intxn on training or test data?
+shapIntxn_LR = getSHAP_Intxn("LR", "L2", modelTrain, train_loader, xAI_list1, xAI_list2, ysd_train, baseline, dic, device)
+shapIntxn_NN = getSHAP_Intxn("NN", "L2", model, train_loader, xAI_list1, xAI_list2, ysd_train, baseline, dic, device)
 
 # write shap results to csv output file
 # shapIntxn_LR.to_csv(f"{outFileBase}_ShapIntxn_LR.csv")
 # shapIntxn_NN.to_csv(f"{outFileBase}_ShapIntxn_NN.csv")
 # concatenate LR and NN shap Main results and write to same file
 shapIntxn = pd.concat([shapIntxn_LR, shapIntxn_NN], axis=0)  # concatenate rows
-shapIntxn.to_csv(f"{outFileBase}_SHAPIntxn_test.csv", index=True)
+shapIntxn.to_csv(f"{outFileBase}_SHAPIntxn_Train.csv", index=True)
 
 
