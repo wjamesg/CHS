@@ -20,21 +20,38 @@ import shap
 # Some basic input parameters
 
 # Data-related input and preparation
+# following are default values...provide actual input data names below depending on desired analysis datasets
+trainData       = 'train.csv' # train and test data if trainTestData=True
+testData        = 'test.csv'
+allData         = 'all.csv'
+# CHS
 datadir         = "C:/jim/Sab/CHS/"
 inputAllData    = False # input separate train/test data
-trainData       = 'CHSTrain.csv' # train and test data if trainTestData=True
-testData        = 'CHSTest.csv'
-allData         = 'CHS.csv' # all data if trainTestData=False
-testSize        = 0.1  # if trainTestData=False, what fraction of allData allocated to testing?
-valSize         = 0.1  # what fraction of training data allocated to validation
 binary_outcome  = False  # True or False (capitalized)
+trainData       = 'chstrain.csv' # train and test data if trainTestData=True
+testData        = 'chstest.csv'
+allData         = 'chsfull.csv'
 ylist           = ['lfe']
 elist           = ['t', 'rht', 'rbmi', 'ri', 'ttasthma', 'exer', 'smokyear', 'yasthma', 'male', 'racea',
                    'raceb', 'raced', 'racem', 'raceo', 'hispd', 'hisph']
 tempglist       = []
 xAI_list1       = ['male']              # for use in shap intxn calculations
 xAI_list2       = ['t','rht','yasthma'] # for use in shap intxn calculations
-outFileBase     = "CHS1"
+
+# simChallenge2
+datadir         = "C:/jim/Sab/Sab1/NNPlusXAI/"
+inputAllData    = True # input separate train/test datad
+binary_outcome  = False  # True or False (capitalized)
+allData         = 'simulationChallenge2.csv' # all data if trainTestData=False
+ylist           = ['y']
+elist           = ['e', 'z']
+tempglist       = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']
+xAI_list1       = elist              # for use in shap intxn calculations
+xAI_list2       = tempglist          # for use in shap intxn calculations
+outFileBase     = "simChall2"
+
+testSize        = 0.1  # if trainTestData=False, what fraction of allData allocated to testing?
+valSize         = 0.1  # what fraction of training data allocated to validation
 codeCodom       = False  # additively coded g in input data will be recoded into two codom indicators in split_columns
 use_study       = False # Include study indicators?  If so, 2-component network will be used (simpleNN_2)
 PATHWAY_AS_INTERMEDIATE = False
@@ -52,7 +69,7 @@ f_n_hidden            = 2     # how many hidden layers in first network
 f_n_neurons           = 16    # how many neurons per hidden layer in first network
 f_activation_name     = "Linear" # no activation...should approximate logistic or linear regression
 f_activation_name     = "Softplus" # activation fct for hidden layers in first network
-f_n_epochs            = 200  # how many epochs during final training/testing phase?
+f_n_epochs            = 300  # how many epochs during final training/testing phase?
 batchsize_test        = 512   # how many per batch for test evaluation (ignored for all training)
 ranNum                = 123  # Initial seed value for random number generator
 f_dropout_rate        = 0.25
@@ -98,7 +115,6 @@ t_weight_decay        = [0, 1e-4, 1e-3]     # this should be numbers representin
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(device)
 
-
 # create codominant coding of genotypes.  cols input is list of genotype labels.
 # output return are updated versions of indf dataframe and glist
 def split_columns(indf, cols):
@@ -113,7 +129,7 @@ def split_columns(indf, cols):
     return indf, new_glist
 
 # function to read data from above input file
-def readData(dir,file,datatype):
+def readData(dir,file):
     # ************** Data input and preprocessing **************
     # set data up for linear  regression and NN
     # First read in all the data from the csv file
@@ -127,13 +143,13 @@ def readData(dir,file,datatype):
         glist = tempglist
 
     # Print the resulting dataframe
-    print(f"data type: {datatype}")
-    print(f"head: {df.head()}")
-    print(f"tail: {df.tail()}")
-    print(f"shape: {df.shape}")
-    print(f"describe: {df.describe()}")
-    print(f"columns: {df.columns}")
-    print(f"dtypes: {df.dtypes}")
+    print(f"input data: {file}")
+    print(f"head      : {df.head()}")
+    print(f"tail      : {df.tail()}")
+    print(f"shape     : {df.shape}")
+    print(f"describe  : {df.describe()}")
+    print(f"columns   : {df.columns}")
+    print(f"dtypes    : {df.dtypes}")
     # Jim added block below to optionally recode g using Mingzhi's split_columns function
     '''
     if codeCodom:
@@ -166,6 +182,7 @@ def dfToTensor(label, df, xcols, ycol):
     # Create tensors X and y from dataframe
     X = df[xcols].values  # numpy arrays
     y = df[ycol].values
+    y_mean = np.mean(y)
     y_sd = np.std(y)  # Jim added this
     y_L1_d = np.mean(np.abs(y-np.mean(y)))
     X = torch.tensor(X, dtype=torch.float32)  # tensors
@@ -177,7 +194,7 @@ def dfToTensor(label, df, xcols, ycol):
     yvec = y.ravel()
     print(f"   Counts of y : {pd.Series(yvec).value_counts()}")
     # create dummy tensor used only to apply .shape[1] to get firstnumX for use below
-    print(f"   Mean of y   : {np.mean(y)}")
+    print(f"   Mean of y   : {y_mean}")
     print(f"   SD of y     : {y_sd}")
     print(f"   L1_d of y   : {y_L1_d}")
     return X, y, y_sd, y_L1_d
@@ -707,12 +724,12 @@ def get_shap_interaction_adjusted(i, j, model, model_type, norm_type, y_sd, data
 # *** Read Data and if reading full dataset, split into train/test
 print("Reading and processing data")
 if inputAllData:
-    train_df = readData(datadir,trainData)
-    test_df  = readData(datadir,testData)
-else:
-    all_df = readData(datadir,allData)
+    all_df = readData(datadir, allData)
     # generate train and test dataframes
     train_df,test_df = train_test_split(all_df,test_size=testSize,shuffle=True, random_state=ranNum)
+else:
+    train_df = readData(datadir, trainData)
+    test_df  = readData(datadir, testData)
 
 # *** Generate training and validation dataset
 train_df, val_df = train_test_split(train_df,test_size=valSize,shuffle=True)
@@ -882,5 +899,5 @@ shapIntxn_NN = getSHAP_Intxn("NN", "L2", model, train_loader, xAI_list1, xAI_lis
 # concatenate LR and NN shap Main results and write to same file
 shapIntxn = pd.concat([shapIntxn_LR, shapIntxn_NN], axis=0)  # concatenate rows
 shapIntxn.to_csv(f"{outFileBase}_SHAPIntxn_Train.csv", index=True)
-
+print("Done with analysis!")
 
