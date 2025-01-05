@@ -27,7 +27,7 @@ testData        = 'test.csv'  # ignored if inputAllData is True
 # CHS
 datadir         = "C:/jim/Sab/CHS/"
 inputAllData    = False
-allData         = 'chsfull.csv'
+allData         = 'chsfull.csv'  # all data ignored
 trainData       = 'chstrain.csv'
 testData        = 'chstest.csv'
 binary_outcome  = False
@@ -37,6 +37,8 @@ elist           = ['t', 'rht', 'rbmi', 'ri', 'ttasthma', 'exer', 'smokyear', 'ya
 tempglist       = []
 xAI_list1       = ['male']              # for use in shap intxn calculations
 xAI_list2       = ['t','rht','yasthma'] # for use in shap intxn calculations
+outFileBase     = "CHS1"
+
 '''
 # simChallenge2
 datadir         = "C:/jim/Sab/Sab1/NNPlusXAI/"
@@ -59,21 +61,21 @@ Path2Pathway_File       = "pathways2.csv"
 PATHWAY_ARRAY_LENGTH    = 1  # The length of the subarray which represent one pathway node
 NUMBER_OF_COVARIATES    = 16 # The number of covariates for pathway as intermediate model and they are the columns at the left side of the input file
 
-# NN architecture
-tune            = False # True: use optuna to train;  False: train using fixed set of hyperparms
-prune           = False # if tuning, do you want to prune epochs that do not appear to be improvements?
+# ******* NN architecture **********
+tune            = True # True: use optuna to train;  False: train using fixed set of hyperparms
+prune           = True # if tuning, do you want to prune epochs that do not appear to be improvements?
 # f_: if tune=False:  Fixed values for running training/val only once
 # (ignored if doing optuna)
 # first set up the two parts of the network
 f_n_hidden            = 2     # how many hidden layers in first network
-f_n_neurons           = 16    # how many neurons per hidden layer in first network
-f_activation_name     = "Linear" # no activation...should approximate logistic or linear regression
-f_activation_name     = "Softplus" # activation fct for hidden layers in first network
-f_n_epochs            = 300  # how many epochs during final training/testing phase?
+f_n_neurons           = 32    # how many neurons per hidden layer in first network
+#f_activation_name     = "Linear" # no activation...should approximate logistic or linear regression
+f_activation_name     = "relu" # activation fct for hidden layers in first network
+f_n_epochs            = 1000  # how many epochs during final training/testing phase?
 batchsize_test        = 512   # how many per batch for test evaluation (ignored for all training)
-ranNum                = 123  # Initial seed value for random number generator
-f_dropout_rate        = 0.25
-f_batch_size          = 512
+ranNum                = 123   # Initial seed value for random number generator
+f_dropout_rate        = 0.15
+f_batch_size          = 256
 f_weight_decay        = 0.0  # >0 does regularization...default to zero
 # weight decay is L2 penalty on # parms of form weight_decay*sum(weights^2) so model does not get too complex
 f_lr_init             = 0.001 # initial lr used by scheduler
@@ -88,12 +90,12 @@ f_activation_name2     = "Softplus" # activation fct for hidden layers in second
 
 # t_: if tune=True...Tuning set of hyperparameters to be considered by Optuna
 t_n_trials            = 100 # how many trials to run
-n_epochs_trial        = 50  # how many epochs during optuna trial phase?
+n_epochs_trial        = 100  # how many epochs during optuna trial phase?
 # structures of the main network to sample and if use_study, the second network
 t_nHidden_lo          = 1       # sampled
 t_nHidden_hi          = 3
 t_nNeurons_lo         = 8       # sampled
-t_nNeurons_hi         = 512
+t_nNeurons_hi         = 128
 t_n_hidden2           = 0   # how many hidden layers in second (study+) network (zero will use study as bias parms)
 t_n_neurons2          = 8   # how many neurons per hidden layer in second network (irrelevant if hidden2=0)
 # optimization parameter ranges to try
@@ -873,7 +875,7 @@ perf_NNtest = getNNPerformance(model, test_loader)
 # write performance results
 perf_test = pd.concat([perf_LRtest, perf_NNtest], axis=0)  # concatenate rows
 perf_test.to_csv(f"{outFileBase}_ModelPerformance_Test.csv", index=False)
-
+'''
 # get shap for main effects
 # Jim, run shap main on training data?
 shapMain_NN = getSHAP_Main('NN',model, train_loader, ysd_train, yL1_train, xcols, baseline)
@@ -902,4 +904,4 @@ shapIntxn_NN = getSHAP_Intxn("NN", "L2", model, train_loader, xAI_list1, xAI_lis
 shapIntxn = pd.concat([shapIntxn_LR, shapIntxn_NN], axis=0)  # concatenate rows
 shapIntxn.to_csv(f"{outFileBase}_SHAPIntxn_Train.csv", index=True)
 print("Done with analysis!")
-
+'''
