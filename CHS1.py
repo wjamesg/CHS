@@ -21,35 +21,35 @@ import shap
 
 # Data-related input and preparation
 # following are default values...provide actual input data names below depending on desired analysis datasets
-trainData       = 'train.csv' # train and test data if trainTestData=True
-testData        = 'test.csv'
-allData         = 'all.csv'
+allData         = 'all.csv'   # ignored if inputAllData is False
+trainData       = 'train.csv' # ignored if inputAllData is True
+testData        = 'test.csv'  # ignored if inputAllData is True
 # CHS
 datadir         = "C:/jim/Sab/CHS/"
-inputAllData    = False # input separate train/test data
-binary_outcome  = False  # True or False (capitalized)
-trainData       = 'chstrain.csv' # train and test data if trainTestData=True
-testData        = 'chstest.csv'
+inputAllData    = False
 allData         = 'chsfull.csv'
+trainData       = 'chstrain.csv'
+testData        = 'chstest.csv'
+binary_outcome  = False
 ylist           = ['lfe']
 elist           = ['t', 'rht', 'rbmi', 'ri', 'ttasthma', 'exer', 'smokyear', 'yasthma', 'male', 'racea',
                    'raceb', 'raced', 'racem', 'raceo', 'hispd', 'hisph']
 tempglist       = []
 xAI_list1       = ['male']              # for use in shap intxn calculations
 xAI_list2       = ['t','rht','yasthma'] # for use in shap intxn calculations
-
+'''
 # simChallenge2
 datadir         = "C:/jim/Sab/Sab1/NNPlusXAI/"
-inputAllData    = True # input separate train/test datad
-binary_outcome  = False  # True or False (capitalized)
+inputAllData    = True
 allData         = 'simulationChallenge2.csv' # all data if trainTestData=False
+binary_outcome  = False
 ylist           = ['y']
 elist           = ['e', 'z']
 tempglist       = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']
 xAI_list1       = elist              # for use in shap intxn calculations
 xAI_list2       = tempglist          # for use in shap intxn calculations
 outFileBase     = "simChall2"
-
+'''
 testSize        = 0.1  # if trainTestData=False, what fraction of allData allocated to testing?
 valSize         = 0.1  # what fraction of training data allocated to validation
 codeCodom       = False  # additively coded g in input data will be recoded into two codom indicators in split_columns
@@ -172,13 +172,15 @@ def get_yx(y,e,g):
     n_x = len(xcols)
     print(f"numy        : {len(ycol)}")
     print(f"numX        : {n_x}")
-    print(f"X           : {xcols}")
+    print(f"xcols       : {xcols}")
     return ycol, xcols, n_x
 
 # function to input dataframe and return X,y numpy arrays and X,y torch tensors. Used by get_Xten_yten function
 def dfToTensor(label, df, xcols, ycol):
     global y_sd  # Jim added this
     global y_L1_d
+
+    print(f"xcols in dfToTensor      : {xcols}")
     # Create tensors X and y from dataframe
     X = df[xcols].values  # numpy arrays
     y = df[ycol].values
