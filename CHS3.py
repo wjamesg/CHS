@@ -16,6 +16,7 @@ import optuna
 import statsmodels.api as sm   # statsmodels package for regression
 from captum.attr import IntegratedGradients
 import shap
+import csv
 
 # Some basic input parameters
 
@@ -35,6 +36,8 @@ ylist           = ['lfe']
 elist           = ['t', 'rht', 'rbmi', 'ri', 'ttasthma', 'exer', 'smokyear', 'yasthma', 'male', 'racea',
                    'raceb', 'raced', 'racem', 'raceo', 'hispd', 'hisph']
 tempglist       = []
+runShapMain     = False
+runShapIntxn    = False
 xAI_list1       = ['male']              # for use in shap intxn calculations
 xAI_list2       = ['t','rht','yasthma'] # for use in shap intxn calculations
 outFileBase     = "CHS1"
@@ -70,7 +73,7 @@ prune           = False # if tuning, do you want to prune epochs that do not app
 f_n_hidden            = 2     # how many hidden layers in first network
 f_n_neurons           = 32    # how many neurons per hidden layer in first network
 #f_activation_name     = "Linear" # no activation...should approximate logistic or linear regression
-f_activation_name     = "relu" # activation fct for hidden layers in first network
+f_activation_name     = "elu" # activation fct for hidden layers in first network
 f_n_epochs            = 1000  # how many epochs during final training/testing phase?
 batchsize_test        = 512   # how many per batch for test evaluation (ignored for all training)
 ranNum                = 123   # Initial seed value for random number generator
@@ -117,6 +120,25 @@ t_weight_decay        = [0, 1e-4, 1e-3]     # this should be numbers representin
 # set device to gpu if it exists or to cpu otherwise
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(device)
+
+class CSVWriter():
+    filename = None
+    fp = None
+    writer = None
+
+    def __init__(self, filename):
+        self.filename = filename
+        self.fp = open(self.filename, 'w', encoding='utf8')
+        self.writer = csv.writer(self.fp, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL, lineterminator='\n')
+
+    def close(self):
+        self.fp.close()
+
+    def write(self, *args):
+        self.writer.writerow(args)
+
+    def fname(self):
+        return self.filename
 
 # create codominant coding of genotypes.  cols input is list of genotype labels.
 # output return are updated versions of indf dataframe and glist
@@ -268,7 +290,8 @@ def getPerformanceBinary(method,actuals,predictions,probabilities):
     plt.xlabel(f"Predicted probabilities by {method}")
     plt.hist(probabilities)
     plt.show()
-    result = pd.DataFrame([[method,auc,f1,tjur_rsq]],columns=['Method','AUC','f1','tjurRsq'])
+    # result = pd.DataFrame([[method,auc,f1,tjur_rsq]],columns=['Method','AUC','f1','tjurRsq'])
+    result = [method, auc, f1, tjur_rsq]
     return result
 
 def getPerformanceContinuous(method,actuals,predictions):
@@ -295,7 +318,8 @@ def getPerformanceContinuous(method,actuals,predictions):
     plt.ylabel("Predictions")
     plt.xlabel(f"Actuals")
     plt.show()
-    result = pd.DataFrame([[method,rsq,mse]],columns=['Method','Rsq','MSE'])
+    #result = pd.DataFrame([[method,rsq,mse]],columns=['Method','Rsq','MSE'])
+    result = [method,rsq,mse]
     return result
 
 # functions to run standard linear and logistic regression
@@ -781,18 +805,19 @@ if binary_outcome:
 print("*** Standard Regression ***")
 if binary_outcome:
     if inputAllData:
-        runLogistic(X_all,y_all,X_all,y_all,'full data')
-    modelTrain, perf_LRtest = runLogistic(X_train, y_train, X_test, y_test, 'train/test')
+        modelAll, perf_LRall = runLogistic(X_all,y_all,X_all,y_all,'full data')
+    modelTrain, perf_LRtest  = runLogistic(X_train, y_train, X_test, y_test, 'train/test')
 else:
     if inputAllData:
-        runLinear(X_all,y_all,X_all,y_all,'full data')
-    modelTrain, perf_LRtest = runLinear(X_train, y_train, X_test, y_test, 'train/test')
+        modelAll, perf_LRall = runLinear(X_all,y_all,X_all,y_all,'full data')
+    modelTrain, perf_LRtest  = runLinear(X_train, y_train, X_test, y_test, 'train/test')
 
 # compute shap for standard regression
 # Jim use train data for computing shap?
 num_baseline = min(1000, len(y_train))
 baseline = get_sample(train_loader, num_baseline)
-shapMain_LR = getSHAP_Main('LR', modelTrain, X_train, ysd_train, yL1_train, xcols, baseline)
+if runShapMain:
+    shapMain_LR = getSHAP_Main('LR', modelTrain, X_train, ysd_train, yL1_train, xcols, baseline)
 print("*** Done with standard regression ***")
 
 # ************** End: Standard Regression  **************
@@ -852,6 +877,7 @@ else:
 
 # *** Re-train the model based on optimal/fixed hyperparm settings
 print("Final training of the model based on optimal/fixed hyperparms")
+
 runNNFinal(X_train, y_train, X_val, y_val, dropout_rate, n_hidden, n_neurons, activation_function,
            lr_init,weight_decay)
 
@@ -874,36 +900,47 @@ model.eval()  # Set the model to evaluation mode
 # get performance on test data
 perf_NNtest = getNNPerformance(model, test_loader)
 
-# write performance results
-perf_test = pd.concat([perf_LRtest, perf_NNtest], axis=0)  # concatenate rows
-perf_test.to_csv(f"{outFileBase}_ModelPerformance_Test.csv", index=False)
-'''
+# write model structure and performance stats
+mycsv = CSVWriter(f"{outFileBase}_modelAndPerformance.csv")
+mycsv.write("Target and Features")
+mycsv.write("y",[ycol])
+mycsv.write("X",[xcols])
+mycsv.write("")
+mycsv.write("Performance")
+mycsv.write("Method","R-sq","MSE")
+mycsv.write(f"{perf_LRtest[0]}",f"{perf_LRtest[1]}",f"{perf_LRtest[2]}")
+mycsv.write(f"{perf_NNtest[0]}",f"{perf_NNtest[1]}",f"{perf_NNtest[2]}")
+mycsv.write("")
+mycsv.write("Hyperparm settings used in final NN run")
+mycsv.write("n Hidden",f"{n_hidden}")
+mycsv.write("n Neurons",f"{n_neurons}")
+mycsv.write("dropout rate",f"{dropout_rate}")
+mycsv.write("batch size",f"{batch_size}")
+mycsv.write("weight decay",f"{weight_decay}")
+mycsv.write("lr init",f"{lr_init}")
+mycsv.close()
+
 # get shap for main effects
 # Jim, run shap main on training data?
-shapMain_NN = getSHAP_Main('NN',model, train_loader, ysd_train, yL1_train, xcols, baseline)
-# get shapIntxn_NN for interaction effects (Mingzhi)
+if runShapMain:
+    shapMain_NN = getSHAP_Main('NN',model, train_loader, ysd_train, yL1_train, xcols, baseline)
+    # concatenate with shapLRa
+    shapMain = pd.concat([shapMain_LR, shapMain_NN], axis=1)  # concatenate columns
+    # write shap results to csv output file
+    shapMain.to_csv(f"{outFileBase}_SHAPMain_Train.csv", index=False)
 
-# write shap results to csv output file
-# shapMain_LR.to_csv(f"{outFileBase}_ShapMain_LR.csv")
-# shapMain_NN.to_csv(f"{outFileBase}_ShapMain_NN.csv")
-# concatenate LR and NN shap Main results and write to same file
-shapMain = pd.concat([shapMain_LR, shapMain_NN], axis=1)  # concatenate columns
-shapMain.to_csv(f"{outFileBase}_SHAPMain_Train.csv", index=False)
+if runShapIntxn:
+    dic={} #DICTIONARY for feature name to feature number
+    for i in range(0,len(xcols)):
+        dic[xcols[i]]=i
 
-dic={} #DICTIONARY for feature name to feature number
-for i in range(0,len(xcols)):
-    dic[xcols[i]]=i
+    # get_shap_interaction_adjusted(0, 1, model, "NN", "L2", y_sd, test_loader, baseline,device)
+    # Jim: get shap intxn on training or test data?
+    shapIntxn_LR = getSHAP_Intxn("LR", "L2", modelTrain, train_loader, xAI_list1, xAI_list2, ysd_train, baseline, dic, device)
+    shapIntxn_NN = getSHAP_Intxn("NN", "L2", model, train_loader, xAI_list1, xAI_list2, ysd_train, baseline, dic, device)
 
-# get_shap_interaction_adjusted(0, 1, model, "NN", "L2", y_sd, test_loader, baseline,device)
-# Jim: get shap intxn on training or test data?
-shapIntxn_LR = getSHAP_Intxn("LR", "L2", modelTrain, train_loader, xAI_list1, xAI_list2, ysd_train, baseline, dic, device)
-shapIntxn_NN = getSHAP_Intxn("NN", "L2", model, train_loader, xAI_list1, xAI_list2, ysd_train, baseline, dic, device)
+    # concatenate LR and NN shap Main results and output to file
+    shapIntxn = pd.concat([shapIntxn_LR, shapIntxn_NN], axis=0)  # concatenate rows
+    shapIntxn.to_csv(f"{outFileBase}_SHAPIntxn_Train.csv", index=True)
 
-# write shap results to csv output file
-# shapIntxn_LR.to_csv(f"{outFileBase}_ShapIntxn_LR.csv")
-# shapIntxn_NN.to_csv(f"{outFileBase}_ShapIntxn_NN.csv")
-# concatenate LR and NN shap Main results and write to same file
-shapIntxn = pd.concat([shapIntxn_LR, shapIntxn_NN], axis=0)  # concatenate rows
-shapIntxn.to_csv(f"{outFileBase}_SHAPIntxn_Train.csv", index=True)
 print("Done with analysis!")
-'''
