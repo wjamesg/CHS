@@ -41,6 +41,23 @@ runShapIntxn    = False
 xAI_list1       = ['male']              # for use in shap intxn calculations
 xAI_list2       = ['t','rht','yasthma'] # for use in shap intxn calculations
 outFileBase     = "CHS1"
+# CHSpoll:  I think there is a problem with the train/val split as repeated obs per subject are split across these
+# not sure I trust the trained model for pollution (and perhaps not optimal for non-pollution runs also)
+datadir         = "C:/jim/Sab/CHS/"
+inputAllData    = False
+allData         = 'chsfullpoll.csv'  # all data ignored
+trainData       = 'chstrainpoll.csv'
+testData        = 'chstestpoll.csv'
+binary_outcome  = False
+ylist           = ['lfe']
+elist           = ['t', 'rht', 'rbmi', 'ri', 'ttasthma', 'exer', 'smokyear', 'yasthma', 'male', 'racea',
+                   'raceb', 'raced', 'racem', 'raceo', 'hispd', 'hisph', 'd1q1']
+tempglist       = []
+runShapMain     = True
+runShapIntxn    = False
+xAI_list1       = ['t']              # for use in shap intxn calculations
+xAI_list2       = ['male','d1q1','yasthma'] # for use in shap intxn calculations
+outFileBase     = "CHS4"
 
 '''
 # simChallenge2
@@ -610,6 +627,29 @@ def runNNFinal(X_train, y_train, X_val, y_val, dropout_rate, n_hidden, n_neurons
     plt.legend()
     plt.show()
 
+# write Performance stats for LR and NN, along with basic model structure info
+def writePerformance(perf_LRtest,perf_NNtest,dict):
+    mycsv = CSVWriter(f"{outFileBase}_modelAndPerformance.csv")
+    mycsv.write("Data, Target, and Features")
+    mycsv.write("dir", datadir)
+    if allData:
+        mycsv.write("allData", allData)
+    else:
+        mycsv.write("trainData", trainData)
+        mycsv.write("testData", testData)
+    mycsv.write("y", ycol)
+    mycsv.write("X", xcols)
+    mycsv.write("")
+    mycsv.write("Performance")
+    mycsv.write("Method", "R-sq", "MSE")
+    mycsv.write(f"{perf_LRtest[0]}", f"{perf_LRtest[1]}", f"{perf_LRtest[2]}")
+    mycsv.write(f"{perf_NNtest[0]}", f"{perf_NNtest[1]}", f"{perf_NNtest[2]}")
+    mycsv.write("")
+    mycsv.write("Hyper-parm settings used in final NN run")
+    for key, value in dict.items():
+        mycsv.write(key, value)
+    mycsv.close()
+
 # compute shap values based on final model
 # function to draw random sample for use by shap
 def get_sample(data_loader, sample_size):
@@ -901,24 +941,21 @@ model.eval()  # Set the model to evaluation mode
 perf_NNtest = getNNPerformance(model, test_loader)
 
 # write model structure and performance stats
-mycsv = CSVWriter(f"{outFileBase}_modelAndPerformance.csv")
-mycsv.write("Target and Features")
-mycsv.write("y",[ycol])
-mycsv.write("X",[xcols])
-mycsv.write("")
-mycsv.write("Performance")
-mycsv.write("Method","R-sq","MSE")
-mycsv.write(f"{perf_LRtest[0]}",f"{perf_LRtest[1]}",f"{perf_LRtest[2]}")
-mycsv.write(f"{perf_NNtest[0]}",f"{perf_NNtest[1]}",f"{perf_NNtest[2]}")
-mycsv.write("")
-mycsv.write("Hyperparm settings used in final NN run")
-mycsv.write("n Hidden",f"{n_hidden}")
-mycsv.write("n Neurons",f"{n_neurons}")
-mycsv.write("dropout rate",f"{dropout_rate}")
-mycsv.write("batch size",f"{batch_size}")
-mycsv.write("weight decay",f"{weight_decay}")
-mycsv.write("lr init",f"{lr_init}")
-mycsv.close()
+hyperParmDic = {
+    "tune": tune,
+    "prune": prune,
+    "n Hidden": n_hidden,
+    "n Neurons": n_neurons,
+    "activation": activation_function,
+    "dropout rate": dropout_rate,
+    "batch size": batch_size,
+    "weight decay": weight_decay,
+    "lr init": lr_init,
+    "f_lr_step_size": f_lr_step_size,
+    "f_lr_gamma": f_lr_gamma,
+    "f_n_epochs": f_n_epochs
+}
+writePerformance(perf_LRtest,perf_NNtest,hyperParmDic)
 
 # get shap for main effects
 # Jim, run shap main on training data?
